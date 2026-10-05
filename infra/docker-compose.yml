@@ -1,0 +1,23 @@
+# Optional — this machine already has a native PostgreSQL 16 install
+# (see apps/api/.env), so local dev doesn't currently depend on this file.
+# Kept for parity with other environments / eventual deployment.
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: homeinterior
+      POSTGRES_PASSWORD: homeinterior
+      POSTGRES_DB: homeinterior
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U homeinterior"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres-data:

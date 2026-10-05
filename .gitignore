@@ -1,0 +1,10 @@
+node_modules/
+.turbo/
+dist/
+.next/
+storage/
+.env
+.env.local
+*.log
+.DS_Store
+apps/api/generated/

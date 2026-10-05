@@ -1,0 +1,379 @@
+generator client {
+  provider     = "prisma-client"
+  output       = "../generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  ADMIN
+  DESIGNER
+  CUSTOMER
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  name         String?
+  role         Role     @default(CUSTOMER)
+  defaultUnit  String?  // editor's preferred display unit ('mm' | 'cm' | 'm' | 'ft'); unset -> app default
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  deletedAt    DateTime?
+
+  // Personal/individual subscription — mirrors the same fields on Team.
+  // A user's own plan covers their personal (non-team) projects; a
+  // team-owned project always uses the team's plan instead. See
+  // BillingService.getEffectivePlan for how the two interact.
+  planTier                 PlanTier @default(FREE)
+  stripeCustomerId         String?
+  stripeSubscriptionId     String?
+  stripeSubscriptionStatus String?
+  trialUsed                Boolean  @default(false)
+
+  projects        Project[]
+  ownedTeams      Team[]       @relation("TeamOwner")
+  teamMemberships TeamMember[]
+  customTemplates CustomTemplate[]
+  notifications   Notification[]
+
+  @@map("users")
+}
+
+// A project always keeps its personal creator/owner (`ownerId`, unchanged
+// since Phase 1) and can *additionally* belong to a Team for shared access
+// (§8 in the roadmap). `teamId` is nullable and additive on purpose — every
+// project created before this phase keeps working exactly as before with
+// no backfill required; team access is opt-in per project.
+model Project {
+  id           String    @id @default(uuid())
+  ownerId      String
+  teamId       String?
+  name         String
+  description  String?
+  thumbnailUrl String?
+  isPublic     Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  owner      User            @relation(fields: [ownerId], references: [id])
+  team       Team?           @relation(fields: [teamId], references: [id])
+  versions   DesignVersion[]
+  shareLinks ShareLink[]
+  comments   Comment[]
+  proposals  Proposal[]
+
+  @@index([ownerId])
+  @@index([teamId])
+  @@map("projects")
+}
+
+enum PlanTier {
+  FREE
+  PRO
+  ULTIMATE
+}
+
+// The billing entity (§8: "team accounts", "subscription/billing"). Plan
+// tier and Stripe subscription state live here, not on User — a project
+// owned by a Pro team is Pro for every member, and a solo user can go Pro
+// without ever inviting anyone else. See BillingService.getEffectivePlan
+// for how a project without a team still benefits from a Pro team its
+// owner owns.
+model Team {
+  id                       String   @id @default(uuid())
+  name                     String
+  ownerId                  String
+  planTier                 PlanTier @default(FREE)
+  stripeCustomerId         String?
+  stripeSubscriptionId     String?
+  stripeSubscriptionStatus String?
+  trialUsed                Boolean  @default(false) // one-time 30-day Pro trial, per team
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  owner    User         @relation("TeamOwner", fields: [ownerId], references: [id])
+  members  TeamMember[]
+  projects Project[]
+
+  @@index([ownerId])
+  @@map("teams")
+}
+
+enum TeamRole {
+  OWNER
+  EDITOR
+  VIEWER
+}
+
+model TeamMember {
+  id        String   @id @default(uuid())
+  teamId    String
+  userId    String
+  role      TeamRole @default(EDITOR)
+  createdAt DateTime @default(now())
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([teamId, userId])
+  @@index([userId])
+  @@map("team_members")
+}
+
+// A view-only public link (§8 exit criteria: "a user can share a view-only
+// link"). No `role` field — every share link is view-only; write access
+// always goes through real authentication + team membership instead.
+model ShareLink {
+  id        String    @id @default(uuid())
+  projectId String
+  token     String    @unique
+  createdBy String
+  expiresAt DateTime?
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@map("share_links")
+}
+
+// A pin dropped on a spot in the design (§ collaboration) — either by a
+// logged-in team member (`authorId` set) or an anonymous client-review
+// viewer through a ShareLink (`authorId` null, `authorName` free text).
+// Point-in-space only (floorId/x/y), not tied to a specific wall/object id,
+// so a pin still makes sense even if the thing it was near gets edited away.
+model Comment {
+  id         String   @id @default(uuid())
+  projectId  String
+  floorId    String?
+  x          Int?
+  y          Int?
+  body       String
+  authorId   String?
+  authorName String?
+  resolved   Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@map("comments")
+}
+
+// A user-saved starting point (§ template gallery) — a frozen snapshot of
+// one project's document at "save as template" time, distinct from the
+// hand-authored PROJECT_TEMPLATES in projects/templates.ts. Deliberately
+// simple: no versioning, no sharing between users: it's "my own quick
+// starting points", not a marketplace.
+model CustomTemplate {
+  id          String   @id @default(uuid())
+  ownerId     String
+  name        String
+  description String?
+  document    Json
+  createdAt   DateTime @default(now())
+
+  owner User @relation(fields: [ownerId], references: [id])
+
+  @@index([ownerId])
+  @@map("custom_templates")
+}
+
+// Full serialized design-document snapshot. The authoritative record of a
+// project's design at a point in time. The normalized House/Floor/Room/etc.
+// tables described in docs/ARCHITECTURE.md are deferred until something
+// other than the editor itself needs to query into the structure (search,
+// AI context building, admin analytics) — the client reads/writes this
+// JSON document wholesale.
+model DesignVersion {
+  id         String   @id @default(uuid())
+  projectId  String
+  versionNum Int
+  document   Json
+  createdBy  String
+  createdAt  DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, versionNum])
+  @@map("design_versions")
+}
+
+enum AssetCategory {
+  DOOR
+  WINDOW
+  FURNITURE
+  KITCHEN
+  BATHROOM
+  ELECTRICAL
+  DECORATION
+  EXTERIOR
+}
+
+// Minimal catalog entry for Phase 2's 2D editor: enough metadata to render
+// a top-down footprint and place it on the floor plan. Full admin
+// upload/3D-model pipeline (§I in the architecture doc) is Phase 4 — for
+// now assets are seeded directly, not user-uploaded.
+model Asset {
+  id              String        @id @default(uuid())
+  category        AssetCategory
+  name            String
+  defaultWidthMm  Int
+  defaultDepthMm  Int
+  defaultHeightMm Int
+  color           String
+  thumbnailKey    String? // local storage key; served as a signed URL, never exposed raw
+  priceCents      Int? // catalog price in USD cents; null -> excluded from cost estimates
+  // A real product page an admin has pasted in for this catalog entry (§
+  // shoppable furniture) — not a live vendor-catalog integration/search,
+  // just a manually-attached link, same spirit as priceCents.
+  vendorName      String?
+  vendorUrl       String?
+  isActive        Boolean       @default(true)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @default(now()) @updatedAt
+
+  @@index([category])
+  @@map("assets")
+}
+
+enum RenderTier {
+  PREVIEW
+  HQ
+}
+
+enum RenderStatus {
+  QUEUED
+  PROCESSING
+  DONE
+  FAILED
+}
+
+// Async render pipeline (§K in the architecture doc). No queue/worker
+// process yet — the job row is processed by a fire-and-forget async call
+// in the same API process (see RenderService), which is enough at this
+// scale; swap to BullMQ+Redis if concurrent render load ever justifies it.
+model RenderJob {
+  id           String       @id @default(uuid())
+  projectId    String
+  requestedBy  String
+  tier         RenderTier
+  status       RenderStatus @default(QUEUED)
+  outputKey    String? // local storage key of the resulting PNG
+  errorMessage String?
+  createdAt    DateTime     @default(now())
+  completedAt  DateTime?
+
+  @@index([projectId])
+  @@map("render_jobs")
+}
+
+enum AiRequestType {
+  FULL_GENERATION
+  SCOPED_EDIT
+  IMAGE_TO_DESIGN
+}
+
+enum AiRequestStatus {
+  PENDING
+  PROPOSED
+  APPLIED
+  REJECTED
+  FAILED
+}
+
+// A reviewable AI proposal (§J in the architecture doc). Deliberately NOT
+// a DesignVersion: most proposals are discarded or edited before the user
+// applies them, and writing every one into version history would pollute
+// it with drafts nobody asked to keep. `apply()` (see AiService) creates a
+// real DesignVersion only once the user explicitly accepts — the AI never
+// writes to the live document on its own.
+model AiRequest {
+  id               String          @id @default(uuid())
+  projectId        String
+  requestedBy      String
+  type             AiRequestType
+  status           AiRequestStatus @default(PENDING)
+  prompt           String?
+  inputImageKey    String? // local storage key of an uploaded room photo, for IMAGE_TO_DESIGN
+  baseDocument     Json // the document the proposal was computed against, for diffing in the UI
+  proposedDocument Json?
+  summary          String? // human-readable list of what the proposal changes, for the preview panel
+  errorMessage     String?
+  createdAt        DateTime        @default(now())
+  completedAt      DateTime?
+
+  @@index([projectId])
+  @@map("ai_requests")
+}
+
+enum NotificationType {
+  COMMENT_POSTED
+  SHARE_LINK_VIEWED
+  RENDER_COMPLETED
+  PROPOSAL_RESPONDED
+}
+
+// In-app notifications only (no email/push) — a single feed per user
+// across every project they can see activity on. `projectId`/`linkPath`
+// are both nullable so the model still makes sense for any future
+// notification kind that isn't tied to one project.
+model Notification {
+  id        String            @id @default(uuid())
+  userId    String
+  type      NotificationType
+  title     String
+  body      String?
+  projectId String?
+  linkPath  String? // relative path the bell dropdown should link to, e.g. /editor/{projectId}
+  readAt    DateTime?
+  createdAt DateTime          @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+  @@map("notifications")
+}
+
+enum ProposalStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  DECLINED
+}
+
+// A client-facing cost proposal (§ client business tools) — a frozen
+// snapshot of the cost estimator's line items (see lib/editor/cost-estimate.ts
+// on the web side, which computes them from live catalog prices) plus a
+// designer fee/notes, with its own share token for a no-login client view
+// (mirrors ShareLink's "no account needed" model). Deliberately NOT
+// invoicing/payment collection — accepting a proposal here just records a
+// status, it never charges a card; real payment needs Stripe Connect and
+// is a business decision, not just an engineering one.
+model Proposal {
+  id             String         @id @default(uuid())
+  projectId      String
+  createdBy      String
+  status         ProposalStatus @default(DRAFT)
+  title          String
+  notes          String?
+  designFeeCents Int            @default(0)
+  lineItems      Json
+  totalCents     Int
+  shareToken     String?        @unique
+  respondedAt    DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@map("proposals")
+}

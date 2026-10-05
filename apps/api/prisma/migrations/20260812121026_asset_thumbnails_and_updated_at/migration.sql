@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "assets" ADD COLUMN     "thumbnailKey" TEXT,
+ADD COLUMN     "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP;
