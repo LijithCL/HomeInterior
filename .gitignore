@@ -2,7 +2,11 @@ node_modules/
 .turbo/
 dist/
 .next/
-storage/
+# Anchored to the repo root — unlike node_modules/.turbo/dist/.next above,
+# "storage" is also a legitimate source directory name (apps/api/src/storage/
+# holds StorageService). An unanchored `storage/` here previously matched
+# that too, silently excluding real application code from every commit.
+/storage/
 .env
 .env.local
 *.log
